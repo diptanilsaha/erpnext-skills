@@ -1,0 +1,14 @@
+{
+ "risks": [
+  {
+   "id": "r1",
+   "title": "<one line: the case where the PR may give a wrong ledger>",
+   "code": "erpnext/accounts/<file>.py:<line>",
+   "example": "<the steps a user takes, with numbers: 1. Sales Invoice 100 EUR at 1.10 ... 2. ... The ledger then shows X, but it must show Y.>",
+   "predicted": "reachable",
+   "why": "<from reading the code: the validations on the way to this state, with file:line, and why they do or do not block it>",
+   "on": "new",
+   "scenarios": ["r1"]
+  }
+ ]
+}
