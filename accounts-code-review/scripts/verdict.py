@@ -16,6 +16,12 @@ Risks (risks.json) are failure cases the agent predicts. The run decides each on
     handled      the state is reached, and every assertion tagged with the risk holds
     confirmed    the state is reached and a tagged assertion fails, or the PR code crashes
                  where the base code does not; a confirmed risk fails the review
+
+Ledger cases (plan.json "ledger": true, see ledger_cases.py) run on every s0 document
+with GL or payment ledger entries: on documents built with the PR code (H against T),
+and on base-code documents acted on by the PR code (T rescan against T built). A rule
+that breaks under the PR code and not under the base code fails the review. With the
+ledger touched, expect.json maps every USE_CASES entry to s0 scenarios or "n/a: <why>".
 """
 
 import fnmatch
@@ -33,6 +39,25 @@ SIDES = {
 UI_PROBLEMS = ("console_errors", "failed_requests", "error")
 VERDICT_ORDER = ["INVALID", "NOT REPRODUCED", "FAIL", "PASS"]
 BLOCKED = "blocked: "  # same prefix as pr_ledger.BLOCKED, which needs frappe to import
+# The kinds of document data that a change to GL or payment ledger posting must be
+# tried on. Fixed, so every ledger review covers the same ground.
+USE_CASES = {
+	"company_currency": "party and document in the company currency",
+	"foreign_currency": "party account in another currency, paid at a different rate",
+	"taxes": "a tax or charge row",
+	"discount_rounding": "a discount, or a rounded total that differs from the grand total",
+	"multiple_rows": "several items or accounts on one voucher",
+	"partial": "a partial payment or a partial return",
+	"advance": "an advance payment allocated or reconciled against the voucher",
+	"return": "a credit or debit note against the voucher",
+}
+CASE_TEXT = {
+	"cancel": "Cancel",
+	"amend": "Cancel and amend",
+	"pay_full": "Full payment",
+	"pay_partial_cancel": "Partial payment, then its cancellation",
+	"return_full": "Full return",
+}
 
 
 def flatten(snap):
@@ -170,6 +195,9 @@ def evaluate(workdir, run_id):
 		if i not in declared_hits:
 			check("WARN", "declared", rule["path"], f"declared change not observed ({rule['comparison']})")
 
+	cases = _ledger_cases(base_ids, head_ids, load, check) if plan.get("ledger") else []
+	if plan.get("ledger"):
+		_use_cases(expect, rundir, head_ids, load, check)
 	reach = _reach(risks, base_ids, head_ids, load, check)
 	_assertions(expect, base_ids, head_ids, skipped, load, check, reach)
 	risk_results = _risk_results(risks, reach, checks, check)
@@ -182,7 +210,69 @@ def evaluate(workdir, run_id):
 		"checks": checks,
 		"changes": changes,
 		"risks": risk_results,
+		"cases": cases,
 	}
+
+
+def _ledger_cases(base_ids, head_ids, load, check):
+	"""Compare each ledger case under the PR code with the same case under the base code."""
+	out = []
+	for vid in head_ids:
+		pairs = [("new", f"T-{vid if vid in base_ids else 'v0'}-built", f"H-{vid}-built")]
+		if vid in base_ids:
+			pairs.append(("old", f"T-{vid}-built", f"T-{vid}-rescan"))
+		for docs, left, right in pairs:
+			base_cases = (load(left) or {}).get("cases", {})
+			head_cases = (load(right) or {}).get("cases", {})
+			for key in sorted(set(base_cases) | set(head_cases)):
+				label, _, case = key.partition(":")
+				b, h = base_cases.get(key), head_cases.get(key)
+				row = {"key": key, "label": label, "case": case, "docs": docs, "variant": vid, "base": b, "head": h}
+				subject = f"{vid} {docs} {key}"
+				what = f"{CASE_TEXT.get(case, case)} of `{label}`" + (" (a base-code document)" if docs == "old" else "")
+				status = "PASS"
+				if h is None:
+					status = "MISSING"  # the PR code did not run it; the snapshot diff reports why
+				elif h["outcome"] != "ok" and not h["outcome"].startswith(BLOCKED):
+					if b and b["outcome"] == h["outcome"]:
+						status = "WARN"
+						check("WARN", "ledger", subject, f"{what} fails on both codes: {h['outcome']}")
+					else:
+						status = "FAIL"
+						check("FAIL", "ledger", subject, f"{what} fails under the PR code: {h['outcome']}")
+				else:
+					new = sorted(set(h["violations"]) - set((b or {}).get("violations", [])))
+					old = sorted(set(h["violations"]) & set((b or {}).get("violations", [])))
+					if new:
+						status = "FAIL"
+						check("FAIL", "ledger", subject, f"{what} under the PR code: {'; '.join(new)}")
+					if old:
+						status = "FAIL" if new else "WARN"
+						check("WARN", "ledger", subject, f"{what}, also on the base code: {'; '.join(old)}")
+				out.append({**row, "status": status})
+	return out
+
+
+def _use_cases(expect, rundir, head_ids, load, check):
+	"""Each use case names s0 scenarios that build on the PR code, or says why it does not apply."""
+	declared = expect.get("use_cases", {})
+	ids = {s["id"] for s in json.loads((rundir / "scenarios.json").read_text())} if (rundir / "scenarios.json").exists() else set()
+	built = set()
+	for vid in head_ids:
+		outcomes = (load(f"H-{vid}-built") or {}).get("outcomes", {})
+		built |= {k[6:] for k, v in outcomes.items() if k.startswith("build-") and v == "ok"}
+	for name in USE_CASES:
+		value = declared.get(name)
+		if value is None:
+			check("INVALID", "use_case", name, f"expect.json use_cases lacks {name!r}")
+			continue
+		if isinstance(value, str) and value.startswith("n/a"):
+			continue
+		for sid in [value] if isinstance(value, str) else value:
+			if sid not in ids:
+				check("INVALID", "use_case", name, f"use case {name}: scenario {sid} is not in s0.py SCENARIOS")
+			elif sid not in built:
+				check("INVALID", "use_case", name, f"use case {name}: scenario {sid} did not build on the PR code")
 
 
 def _reach(risks, base_ids, head_ids, load, check):

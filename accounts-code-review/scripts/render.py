@@ -29,7 +29,15 @@ MERGE_SENTENCE = {
 	"NOT REPRODUCED": "The reported problem does not happen on the base code with the review's data, so the fix is not proven.",
 	"INVALID": "The run is incomplete or inconsistent. Fix the cause below and run the review again.",
 }
+FEATURE_PASS = "The PR does what the feature request asks, every failure case checked is ruled out, and nothing else changed."
 MAX_REASONS = 6
+CASE_TEXT = {
+	"cancel": "Cancel",
+	"amend": "Cancel and amend",
+	"pay_full": "Full payment",
+	"pay_partial_cancel": "Partial payment, then its cancellation",
+	"return_full": "Full return",
+}
 
 
 def render(workdir, state, record, result):
@@ -42,10 +50,10 @@ def render(workdir, state, record, result):
 		"",
 		f"## {MERGE[result.get('mergeable')]}",
 		"",
-		f"{MERGE_SENTENCE[result['verdict']]} <sub>(verdict: {result['verdict']})</sub>",
+		f"{_merge_sentence(w, result)} <sub>(verdict: {result['verdict']})</sub>",
 		"",
 	]
-	out += _checklist(result, record)
+	out += _checklist(result, record, _read_or(w / "expect.json", {}).get("kind", "bug"))
 	out += _reasons(ctx, result)
 	if result["verdict"] != "INVALID":  # an incomplete run proves nothing about the failure cases
 		out += _failure_cases(ctx, result)
@@ -75,6 +83,7 @@ def render_details(workdir, state, record, result):
 	out += _blockers(ctx, result)
 	out += _changes(ctx, result, declared=False)
 	out += _changes(ctx, result, declared=True)
+	out += _ledger_cases(ctx, result)
 	out += _ui(ctx, record)
 	out += _scenarios(ctx, rundir)
 	out += _settings(ctx, plan, analysis, record)
@@ -88,7 +97,7 @@ def render_details(workdir, state, record, result):
 # ---------------------------------------------------------------- short report
 
 
-def _checklist(result, record):
+def _checklist(result, record, kind):
 	checks = result["checks"]
 	assertions = [c for c in checks if c["kind"] == "assertion" and "assertion" in c and not c["assertion"].get("risk")]
 	base = [c for c in assertions if c["assertion"]["snapshot"] in ("base", "ui_base")]
@@ -102,12 +111,23 @@ def _checklist(result, record):
 		rows.append(_bullet(all(c["status"] == "PASS" for c in base), "Bug shows on the base code", "Bug does not show on the base code"))
 	if head:
 		ok = sum(c["status"] == "PASS" for c in head)
-		rows.append(_bullet(ok == len(head), "Fix works", f"Fix works in only {ok} of {len(head)} checks"))
+		noun = "Feature" if kind == "feature" else "Fix"
+		rows.append(_bullet(ok == len(head), f"{noun} works", f"{noun} works in only {ok} of {len(head)} checks"))
 	rows.append(_bullet(not undeclared, "No other change", f"{len(undeclared)} unexpected change(s)"))
 	if record.get("ui"):
 		rows.append(_bullet(not broken, "Ledger consistent, screens work", f"{len(broken)} new ledger or screen error(s)"))
 	else:
 		rows.append(_bullet(not broken, "Ledger consistent", f"{len(broken)} new ledger inconsistency(ies)"))
+	cases = [c for c in result.get("cases", []) if c["status"] != "MISSING"]
+	if cases:
+		broken = sum(c["status"] == "FAIL" for c in cases)
+		rows.append(
+			_bullet(
+				not broken,
+				f"GL and payment ledger correct in {len(cases)} ledger case(s)",
+				f"{broken} of {len(cases)} ledger case(s) break a GL or payment ledger rule",
+			)
+		)
 	if risks:
 		rows.append(
 			_bullet(
@@ -137,6 +157,10 @@ def _reasons(ctx, result):
 				f"On the {on}{setting}, {_lower(ctx.describe(a['path']))} is {_value(a['path'], c['actual'])}; "
 				f"it should be {_value(a['path'], a['equals'])}."
 			)
+		elif c["kind"] == "ledger":
+			vid = c["subject"].split(" ", 1)[0]
+			setting = "" if vid == "v0" else f" With *{_esc(ctx.variant(vid))}*:"
+			lines.append(f"{setting} {_esc(c['detail'])}".strip())
 		elif "undeclared" not in c["detail"]:
 			lines.append(_esc(c["detail"]))
 	undeclared = [c for c in result["changes"] if not c["declared"]]
@@ -217,7 +241,49 @@ def _lower(text):
 	return text[:1].lower() + text[1:]
 
 
+def _merge_sentence(workdir, result):
+	expect = _read_or(workdir / "expect.json", {})
+	if result["verdict"] == "PASS" and expect.get("kind") == "feature":
+		return FEATURE_PASS
+	return MERGE_SENTENCE[result["verdict"]]
+
+
 # ---------------------------------------------------------------- details sections
+
+
+def _ledger_cases(ctx, result):
+	cases = result.get("cases", [])
+	if not cases:
+		return []
+	lines = [
+		"## Ledger cases",
+		"",
+		"Each s0 document with GL or payment ledger entries went through the fixed cases in "
+		"ledger_cases.py, each rolled back after it ran. *PR code* rows use documents built with the "
+		"PR code; *old documents* rows use documents built with the base code and acted on by the PR code.",
+		"",
+		"| Document | Case | Documents | Settings | Base code | PR code |",
+		"| --- | --- | --- | --- | --- | --- |",
+	]
+	for c in cases:
+		lines.append(
+			f"| `{c['label']}` | {CASE_TEXT.get(c['case'], c['case'])} | {'old documents' if c['docs'] == 'old' else 'PR code'} "
+			f"| {_esc(ctx.variant(c['variant']))} | {_case_cell(c['base'])} | {_case_cell(c['head'], c['status'])} |"
+		)
+	return [*lines, ""]
+
+
+def _case_cell(case, status=None):
+	if case is None:
+		return "—"
+	if case["outcome"] != "ok":
+		text = _outcome(case["outcome"])
+	elif case["violations"]:
+		text = "; ".join(_esc(v) for v in case["violations"])
+	else:
+		text = "correct"
+	mark = {"FAIL": "❌ ", "WARN": "⚠️ "}.get(status, "")
+	return mark + text
 
 
 def _summary(ctx, result, plan, record):
@@ -550,6 +616,8 @@ class _Context:
 			return f"Screen: {self.ui.get(parts[1], {}).get('title', parts[1])}"
 		if parts[0] in ("docs", "gl", "ple"):
 			return self.scenario_of(parts[1]) or f"Document {parts[1]}"
+		if parts[0] == "cases":
+			return self.scenario_of(parts[1].split(":", 1)[0]) or "Ledger cases"
 		if parts[0] == "outcomes":
 			sid = parts[1].split("-", 1)[-1]
 			return self.scenarios.get(sid, {}).get("title") or self.scenario_of(sid) or "Actions"
@@ -570,6 +638,9 @@ class _Context:
 			return f"General ledger entries of `{parts[1].strip('<>')}`"
 		if head == "ple":
 			return f"Payment ledger entries of `{parts[1].strip('<>')}`"
+		if head == "cases" and len(parts) >= 2:
+			label, _, case = parts[1].partition(":")
+			return f"Ledger case '{CASE_TEXT.get(case, case)}' of `{label}`"
 		if head == "outcomes":
 			return f"Result of `{parts[1]}`"
 		if head == "reports":
@@ -586,6 +657,8 @@ class _Context:
 			return f"{what}{setting}, {when}: {_rows_delta(before, after)}"
 		if c["path"].startswith("reports."):
 			return f"{what}{setting}, {when}: {_rows_delta(before, after)}"
+		if c["path"].startswith("cases."):
+			return f"{what}{setting}, {when}: {_case_delta(before, after)}"
 		if c["path"].startswith("outcomes."):
 			return f"{what}{setting}, {when}: {_outcome(before)} → {_outcome(after)}"
 		if c["path"] == "invariants":
@@ -612,6 +685,20 @@ def _ui_describe(parts):
 		)
 		return f"At step '{cap}', field {_title(rest[2])} ({prop})"
 	return f"At step '{cap}', {' '.join(_title(p) for p in rest)}"
+
+
+def _case_delta(before, after):
+	if before is None or after is None:
+		return "did not run" if after is None else "runs only on the PR code"
+	parts = []
+	if before["outcome"] != after["outcome"]:
+		parts.append(f"{_outcome(before['outcome'])} → {_outcome(after['outcome'])}")
+	gone = sorted(set(before["violations"]) - set(after["violations"]))
+	new = sorted(set(after["violations"]) - set(before["violations"]))
+	parts += [f"rule now broken: {_esc(v)}" for v in new] + [f"rule now holds: {_esc(v)}" for v in gone]
+	if before.get("ledger") != after.get("ledger"):
+		parts.append("ledger rows differ")
+	return "; ".join(parts) or "same result"
 
 
 def _rows_delta(before, after):

@@ -73,12 +73,19 @@ text in `requirement.json` under `text`. Never reconstruct a ticket from its tit
 or from the PR.
 
 Write `requirement.md` with four parts. Quote the source in each part, or write that
-the source does not state it:
+the source does not state it. For a bug:
 
 - **Reported**: what the user saw, with their numbers.
 - **Expected**: what should happen instead.
 - **Repro**: the steps and the data.
 - **Setup**: the version, country, currency, and every setting the reporter names.
+
+For a feature:
+
+- **Asked**: what the request wants a user to be able to do.
+- **Behavior**: what the ledger, the documents and the screens must show when the feature is used, with numbers where the source gives them.
+- **Example**: the steps and the data of one use of the feature.
+- **Setup**: as for a bug, and the new settings or fields that the PR adds.
 
 Then compare the requirement with `pr.json` and `pr.diff`. Record in
 `requirement.md` any reported case that the PR does not address, and any behavior
@@ -109,6 +116,7 @@ Edit `plan.json` only to add, or to match the requirement's **Setup**:
 - Set `company_profile` (`country`, `currency`, `chart_of_accounts`) when the requirement is regional. The default is a United States company in USD on the Standard chart.
 - Set `item_fields` when the preflight reports that an installed app makes an Item field mandatory.
 - Set `"ui": true` when a server change shows on screen, even with no UI file in the diff.
+- Set `"ledger": true` when the PR changes how GL or payment ledger entries are made and the analysis missed it. Never set it to `false`: `analysis.json` lists under `ledger.reasons` why it is on.
 
 Keep every generated variant. The report prints your edits as a diff against
 `plan.generated.json`.
@@ -146,6 +154,63 @@ The run decides each risk. Your prediction does not:
 A scenario that fails on the base code with an error that is not a validation is
 a bug in `s0.py`, and the run is `INVALID`. If no failure case exists, write
 `{"risks": []}`, and say why in `code-review.md`.
+
+### Ledger changes: `"ledger": true`
+
+`analyze` turns on `"ledger"` when a changed line names GL or payment ledger
+entries, or a changed function calls a posting function (`analyze.LEDGER_CALLS`).
+This applies to a bug fix and to a feature.
+
+With `"ledger"` on, the run takes each document that `s0.py` registers and that has GL or
+payment ledger entries, and puts it through the fixed cases in `scripts/ledger_cases.py`:
+
+| Case | The rule it checks |
+| --- | --- |
+| `cancel` | No live GL or payment ledger rows remain, and the reversal nets every account to zero. |
+| `amend` | The amended voucher posts the same GL and payment ledger rows as the original. |
+| `pay_full` | An invoice's outstanding and its payment ledger balance become zero. |
+| `pay_partial_cancel` | The outstanding drops by the amount paid, and comes back when the payment is cancelled. |
+| `return_full` | The return posts the negative of the original's party GL. |
+
+Each case is rolled back after it runs. It runs twice: on documents built with the PR
+code, and on documents built with the base code that the PR code then acts on. Each
+case also checks the invariants that every snapshot checks: balanced vouchers,
+GL and payment ledger agree for each party account and party, party set on
+receivable and payable rows, amounts consistent in the account's currency, no
+posting to group accounts. A rule that breaks under the PR code and not under the
+base code fails the review.
+
+A case result that differs between the codes is a change like any other. Declare
+the ones the PR causes in `allowed_changes`, for example
+`{"comparison": "build", "path": "cases.s0_invoice:amend", ...}`. Use `rescan` for
+documents built with the base code.
+
+The cases multiply the documents you give them. So, with `"ledger"` on, `expect.json`
+must map each kind of data in `verdict.USE_CASES` to the `s0.py` scenarios that
+cover it, or to `"n/a: <why>"`:
+
+| Use case | Data |
+| --- | --- |
+| `company_currency` | party and document in the company currency |
+| `foreign_currency` | party account in another currency, paid at a different rate |
+| `taxes` | a tax or charge row |
+| `discount_rounding` | a discount, or a rounded total that differs from the grand total |
+| `multiple_rows` | several items or accounts on one voucher |
+| `partial` | a partial payment or a partial return |
+| `advance` | an advance payment allocated or reconciled against the voucher |
+| `return` | a credit or debit note against the voucher |
+
+`lock` refuses a missing entry. The run is `INVALID` if a named scenario does not
+exist or does not build on the PR code.
+
+### Features
+
+Set `"kind": "feature"` in `expect.json`. A feature needs `head` assertions only, on
+the **Behavior** from `requirement.md`. When the feature adds or changes a document
+field, list it in `DOC_FIELDS` in `s0.py`. Then assertions can read it, for
+example `docs.s0_invoice.discount_account`, and the run compares it on both codes.
+Every library scenario still runs on both codes, so any other change to the
+ledger fails the review unless it is declared.
 
 ### Scenarios and assertions
 
@@ -210,21 +275,21 @@ review.py report --workdir <workdir>
 `report.md` is short. It has:
 
 1. **Mergeable** or **Not mergeable**, and one sentence.
-2. A checklist: bug on base code, fix works, no other change, ledger consistent, failure cases.
+2. A checklist: bug on base code, fix (or feature) works, no other change, ledger consistent, ledger cases, failure cases.
 3. **Why**: each blocking problem as one sentence, with the value found and the value expected.
 4. **Where it fails**: each confirmed risk, with its example, its code line, where the run reached it, and the wrong value.
 5. **Checked and ruled out**: one line for each other risk, with the validation that blocks it, or the note that the PR handles it.
 
 `details.md` has everything else: the requirement checks on each code, every
-change as a sentence, screenshots, scenarios, settings, blast radius, the code
+change as a sentence, the ledger cases on each code, screenshots, scenarios, settings, blast radius, the code
 review, warnings and the technical details.
 
 | Verdict | Mergeable | Meaning |
 | --- | --- | --- |
 | `PASS` | yes | Every assertion holds, every difference is declared, and no risk is confirmed. |
-| `FAIL` | no | A `head` assertion fails, an undeclared change or a new invariant violation appeared, or a risk is confirmed. |
+| `FAIL` | no | A `head` assertion fails, an undeclared change or a new invariant violation appeared, a ledger case breaks a rule under the PR code, or a risk is confirmed. |
 | `NOT REPRODUCED` | no | A `base` assertion fails: the base code does not show the reported bug, so the fix is not proven. |
-| `INVALID` | no verdict | The run is incomplete, a locked file changed after the run, two identical base builds differ, a risk scenario is broken, or `expect.json` lacks the required assertions. |
+| `INVALID` | no verdict | The run is incomplete, a locked file changed after the run, two identical base builds differ, a risk or use-case scenario is broken, or `expect.json` lacks the required assertions. |
 
 The decision is `verdict.py`'s. Give it to the user unchanged, in a few lines:
 mergeable or not, the reasons from **Why**, each confirmed risk with its example,
@@ -253,4 +318,5 @@ Read this section when a run is `INVALID`, or when you add to the library.
 - **No background races**: enqueued jobs run inline during the session, and the scheduler is paused.
 - **Browser**: Playwright is pinned. Each UI scenario runs in a fresh browser context with a fixed viewport, locale and timezone, and reduced motion. Every step waits until the network and Frappe's request queue are idle. Times of day are masked, and names are replaced as in the ledger snapshots.
 - **Settings caches**: each settings switch has a console session of its own, and every phase checks that the site is on its variant before it starts.
+- **Ledger cases**: a fixed list of cases in a fixed order. Amounts and rates come from the document, and payments use the document's own rate, so no rate is looked up. Each case is rolled back, so it never changes the snapshot it is part of. A voucher a case creates is named by its role (`<payment>`, `<return>`, `<amended>`).
 - **Library**: `scripts/library.py` runs in every review. Append new scenarios, and never edit or reorder one in place. A scenario that fails on the base code is a `WARN`, because it gives no coverage.

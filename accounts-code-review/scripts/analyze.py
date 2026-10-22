@@ -55,6 +55,30 @@ UI_JSON = re.compile(
 	r"/(doctype|print_format|report|workspace|form_tour|dashboard_chart|number_card)/[^/]+/[^/]+\.json$"
 )
 DEFAULT_PROFILE = {"country": "United States", "currency": "USD", "chart_of_accounts": "Standard"}
+# The PR touches the ledger when a changed line names GL or payment ledger entries,
+# or a changed function calls one of these. Then every s0 document runs the fixed
+# ledger cases (engine.LEDGER_CASES).
+LEDGER_CALLS = {
+	"make_gl_entries",
+	"make_reverse_gl_entries",
+	"make_gl_entries_on_cancel",
+	"get_gl_entries",
+	"build_gl_map",
+	"get_gl_dict",
+	"process_gl_map",
+	"make_advance_gl_entries",
+	"make_exchange_gain_loss_journal",
+	"create_payment_ledger_entry",
+	"update_voucher_outstanding",
+	"update_outstanding_amt",
+	"reconcile_against_document",
+	"cancel_exchange_gain_loss_journal",
+	"unlink_ref_doc_from_payment_entries",
+}
+LEDGER_TEXT = re.compile(
+	r"GL Entry|Payment Ledger Entry|gl_entries|gl_map|get_gl_dict|payment_ledger|make_gl_entries|outstanding_amount"
+)
+LEDGER_FILES = re.compile(r"accounts/general_ledger\.py$|/doctype/(gl_entry|payment_ledger_entry)/")
 
 
 def git(app, *args):
@@ -339,9 +363,15 @@ def analyze(apps_dir, app, apps, base, head):
 	index = Index(apps_dir, apps)
 
 	symbols, settings, json_changes, other_files, tests, hints = [], {}, [], [], [], False
+	ledger = set()
 	for path, lines in sorted(diff.items()):
 		if PRECISION_HINT.search("\n".join(lines["text"])):
 			hints = True
+		if not is_test_file(path):
+			if LEDGER_FILES.search(path):
+				ledger.add(f"{path}: ledger file")
+			if path.endswith(".py") and (m := LEDGER_TEXT.search("\n".join(lines["text"]))):
+				ledger.add(f"{path}: changed line mentions {m[0]!r}")
 		if path.endswith(".json") and "/doctype/" in path:
 			json_changes.append(path)
 		if not path.endswith(".py"):
@@ -363,6 +393,8 @@ def analyze(apps_dir, app, apps, base, head):
 				node = by_name.get(qual)
 				if node is None:
 					continue
+				for call in sorted(ledger_calls(node)):
+					ledger.add(f"{path}:{qual} calls {call}")
 				for s in settings_read(node):
 					settings.setdefault(s, set()).add(f"{path}:{qual}")
 				for _, cq, cfile in callees(node, module_funcs, imports, index):
@@ -409,10 +441,15 @@ def analyze(apps_dir, app, apps, base, head):
 		"needs_migrate": bool(json_changes) or any(p.endswith(("patches.txt", "hooks.py")) for p in diff),
 		"symbols": symbols,
 		"settings": setting_rows,
+		"ledger": {"touched": bool(ledger), "reasons": sorted(ledger)},
 		"reports_touched": sorted({m[1] for p in diff if (m := re.search(r"/report/(\w+)/", p))}),
 		"ui_files": sorted(p for p in diff if is_ui_file(p)),
 		"test_files": sorted(tests),
 	}
+
+
+def ledger_calls(node):
+	return {name for n in ast.walk(node) if isinstance(n, ast.Call) and (name := _call_name(n)) in LEDGER_CALLS}
 
 
 def is_test_file(path):
@@ -477,6 +514,7 @@ def generate_plan(analysis, pr):
 		"company_profile": dict(DEFAULT_PROFILE),
 		"item_fields": {},
 		"ui": bool(analysis["ui_files"]),
+		"ledger": analysis["ledger"]["touched"],
 		"variants": variants,
 		"flips": flips,
 	}

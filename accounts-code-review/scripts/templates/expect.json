@@ -1,5 +1,15 @@
 {
  "kind": "bug",
+ "use_cases": {
+  "company_currency": "",
+  "foreign_currency": "",
+  "taxes": "",
+  "discount_rounding": "",
+  "multiple_rows": "",
+  "partial": "",
+  "advance": "",
+  "return": ""
+ },
  "assertions": [
   {
    "path": "docs.s0_invoice.outstanding_amount",

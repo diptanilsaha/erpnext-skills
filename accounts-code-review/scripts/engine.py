@@ -28,7 +28,7 @@ def engine_main(workdir, command, args_json="{}"):
 	scripts = Path(workdir, ".scripts").read_text().strip()  # written by review.py init
 	if scripts not in sys.path:
 		sys.path.insert(0, scripts)
-	for name in ("pr_ledger", "library"):
+	for name in ("pr_ledger", "library", "ledger_cases"):
 		sys.modules.pop(name, None)
 
 	session = _Session(Path(workdir), json.loads(args_json))
@@ -213,7 +213,7 @@ class _Session:
 			self._build("H", vid, vid)
 			return
 		lab = self._lab("T", vid, vid)
-		self._snapshot(lab, f"T-{vid}-rescan")
+		self._snapshot(lab, f"T-{vid}-rescan", cases=True)  # the PR code acts on base-code documents
 		self._legacy("T", vid, vid)
 		self._build("H", vid, vid)
 		for a, b in self.plan["flips"]:
@@ -257,7 +257,7 @@ class _Session:
 			lab.current = s["id"]
 			lab.attempt(f"build-{s['id']}", lambda s=s: s["build"](lab))
 		self._save_registry(lab, kind, key)
-		self._snapshot(lab, f"{kind}-{key}-built")
+		self._snapshot(lab, f"{kind}-{key}-built", cases=kind in ("C", "T", "H"))
 		if kind in ("UB", "UH"):
 			names = self.L.name_map(lab)
 			_write(
@@ -292,8 +292,16 @@ class _Session:
 			reports.update(self.s0.reports(ctx))
 		return reports
 
-	def _snapshot(self, lab, name):
-		_write(self.snapdir / f"{name}.json", self.L.snapshot(lab, self._reports(lab.ctx)))
+	def _snapshot(self, lab, name, cases=False):
+		"""cases: run the fixed ledger cases on the s0 documents first (rolled back, see ledger_cases.py)."""
+		found = None
+		if cases and self.plan.get("ledger"):
+			import ledger_cases
+
+			s0_ids = {s["id"] for s in getattr(self.s0, "SCENARIOS", [])}
+			found = ledger_cases.run_cases(lab, sorted(k for k, sid in lab.owners.items() if sid in s0_ids))
+		extra = getattr(self.s0, "DOC_FIELDS", None) if self.s0 else None
+		_write(self.snapdir / f"{name}.json", self.L.snapshot(lab, self._reports(lab.ctx), found, extra))
 		print("SNAPSHOT", name)
 
 	def _registry_path(self, kind, key):

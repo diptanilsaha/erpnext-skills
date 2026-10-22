@@ -8,6 +8,13 @@ short report that says if the pull request is mergeable, and gives a worked
 example of each case where it fails. The run checks that a user can reach each
 of these cases. `details.md` has every check.
 
+The skill reviews bug fixes and features. When a pull request changes how GL or
+payment ledger entries are made, each document of the review also goes through a
+fixed set of cases (cancel, amend, full payment, partial payment and its
+cancellation, full return). The review then checks that the GL and the payment
+ledger stay correct, on new documents and on documents created before the
+change.
+
 This file lists what you need before you run it. `SKILL.md` has the procedure
 that the agent follows.
 
@@ -100,7 +107,8 @@ A run takes about one minute for each settings combination on each code. A pull
 request that reads three yes/no settings runs four combinations: the site
 defaults, and each setting switched. That run takes about eight minutes. Each
 setting that changes after posting adds a short pass. UI checks add an asset
-build and a browser pass on each code.
+build and a browser pass on each code. When the pull request touches the ledger,
+the ledger cases add a few seconds for each document of the review, on each code.
 
 ## Commands
 

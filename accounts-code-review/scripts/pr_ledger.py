@@ -333,12 +333,17 @@ class Lab:
 			CREATED.clear()
 			CREATED.update(created)
 			frappe.local.message_log = []
-			# A validation refusal means the standard path cannot reach the state; verdict.py reads the prefix.
-			blocked = BLOCKED if isinstance(e, frappe.ValidationError) else ""
-			self.outcomes[label] = f"{blocked}{type(e).__name__}: {frappe.utils.strip_html(str(e))[:300]}"
+			self.outcomes[label] = outcome_of(e)
 			return None
 		self.outcomes[label] = "ok"
 		return result
+
+
+def outcome_of(error):
+	"""An error as an outcome string. A validation refusal means the standard path
+	cannot reach the state; verdict.py reads the prefix."""
+	blocked = BLOCKED if isinstance(error, frappe.ValidationError) else ""
+	return f"{blocked}{type(error).__name__}: {frappe.utils.strip_html(str(error))[:300]}"
 
 
 # ---------------------------------------------------------------- snapshot
@@ -373,7 +378,7 @@ RUNNING_TOTALS = {
 }
 
 
-def snapshot(lab, reports):
+def snapshot(lab, reports, cases=None, extra_fields=None):
 	"""Company-wide ledger state with every site-specific name replaced by a stable label."""
 	ctx = lab.ctx
 	norm = _Normalizer(_name_map(lab), ctx.company, ctx.abbr)
@@ -416,7 +421,8 @@ def snapshot(lab, reports):
 	docs = {}
 	for label, (doctype, name) in lab.registry.items():
 		doc = frappe.get_doc(doctype, name)
-		docs[label] = {f: norm(doc.get(f)) for f in DOC_FIELDS if f == "docstatus" or doc.meta.has_field(f)}
+		fields = (*DOC_FIELDS, *(extra_fields or {}).get(doctype, ()))
+		docs[label] = {f: norm(doc.get(f)) for f in fields if f == "docstatus" or doc.meta.has_field(f)}
 
 	return {
 		"docs": dict(sorted(docs.items())),
@@ -428,6 +434,7 @@ def snapshot(lab, reports):
 			label: _report(name, filters, norm) for label, (name, filters) in sorted(reports.items())
 		},
 		"invariants": check_invariants(ctx.company, norm),
+		"cases": cases or {},
 	}
 
 
@@ -588,6 +595,77 @@ def check_invariants(company, norm=str):
 	)[0]
 	if abs(flt(dr) - flt(cr)) > 0.005:
 		violations.append(f"trial balance off: Dr {flt(dr, 2)} Cr {flt(cr, 2)}")
+	violations += _party_ledger_violations(company, norm)
+	violations += _account_violations(company, norm)
+	return sorted(violations)
+
+
+def _party_ledger_violations(company, norm):
+	"""Receivable and payable GL must have a party, and agree with the payment ledger per account and party."""
+	party_accounts = """select name from `tabAccount`
+		where company=%(company)s and account_type in ('Receivable', 'Payable')"""
+	violations = [
+		f"GL on party account without party: {v.voucher_type} {norm(v.voucher_no)} {norm(v.account)}"
+		for v in frappe.db.sql(
+			f"""select distinct voucher_type, voucher_no, account from `tabGL Entry`
+			where company=%(company)s and is_cancelled=0 and coalesce(party, '')=''
+			and account in ({party_accounts})""",
+			{"company": company},
+			as_dict=1,
+		)
+	]
+	gl = {
+		(r.account, r.party): flt(r.net, 2)
+		for r in frappe.db.sql(
+			f"""select account, party, sum(debit) - sum(credit) net from `tabGL Entry`
+			where company=%(company)s and is_cancelled=0 and account in ({party_accounts})
+			group by account, party""",
+			{"company": company},
+			as_dict=1,
+		)
+	}
+	ple = {
+		(r.account, r.party): flt(r.net, 2)
+		for r in frappe.db.sql(
+			"""select account, party, sum(amount) net from `tabPayment Ledger Entry`
+			where company=%(company)s and delinked=0 group by account, party""",
+			{"company": company},
+			as_dict=1,
+		)
+	}
+	for key in sorted(set(gl) | set(ple), key=str):
+		if abs(gl.get(key, 0) - ple.get(key, 0)) > 0.005:
+			account, party = key
+			violations.append(
+				f"GL and payment ledger disagree: {norm(account)} {norm(party)} "
+				f"gl={gl.get(key, 0)} ple={ple.get(key, 0)}"
+			)
+	return violations
+
+
+def _account_violations(company, norm):
+	"""GL posts to leaf accounts, in the account's currency, with matching amounts in company-currency accounts."""
+	currency = frappe.get_cached_value("Company", company, "default_currency")
+	rows = frappe.db.sql(
+		"""select e.voucher_type, e.voucher_no, e.account, a.is_group, a.account_currency,
+			e.account_currency gl_currency, e.debit, e.credit,
+			e.debit_in_account_currency dr_ac, e.credit_in_account_currency cr_ac
+		from `tabGL Entry` e join `tabAccount` a on a.name=e.account
+		where e.company=%s and e.is_cancelled=0""",
+		company,
+		as_dict=1,
+	)
+	violations = set()
+	for r in rows:
+		where = f"{r.voucher_type} {norm(r.voucher_no)} {norm(r.account)}"
+		if r.is_group:
+			violations.add(f"GL on group account: {where}")
+		if r.gl_currency and r.gl_currency != r.account_currency:
+			violations.add(f"GL currency {r.gl_currency} differs from account currency: {where}")
+		if r.account_currency == currency and (
+			abs(flt(r.debit) - flt(r.dr_ac)) > 0.005 or abs(flt(r.credit) - flt(r.cr_ac)) > 0.005
+		):
+			violations.add(f"company-currency account with different account-currency amount: {where}")
 	return sorted(violations)
 
 

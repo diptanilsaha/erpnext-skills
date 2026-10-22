@@ -257,6 +257,8 @@ class Review:
 				raise Failure(f"{name} is missing")
 		expect = read(self.workdir / "expect.json")
 		_validate_expect(expect)
+		if read(self.workdir / "plan.json").get("ledger"):
+			_validate_use_cases(expect)
 		_validate_risks(read(self.workdir / "risks.json"), expect)
 		if read(self.workdir / "plan.json").get("ui") and not (self.workdir / "ui.spec.mjs").exists():
 			raise Failure("the PR changes UI files: write ui.spec.mjs (Playwright scenarios) before locking")
@@ -559,6 +561,8 @@ def _wait_for(url, seconds):
 
 
 def _validate_expect(expect):
+	if expect.get("kind", "bug") not in ("bug", "feature"):
+		raise Failure("expect.json kind must be bug or feature")
 	for a in expect.get("assertions", []):
 		missing = {"path", "snapshot", "equals", "why"} - set(a)
 		if missing:
@@ -571,6 +575,22 @@ def _validate_expect(expect):
 		missing = {"comparison", "path", "reason"} - set(rule)
 		if missing:
 			raise Failure(f"allowed change {rule} lacks {sorted(missing)}")
+
+
+def _validate_use_cases(expect):
+	from verdict import USE_CASES
+
+	declared = expect.get("use_cases", {})
+	for name, meaning in USE_CASES.items():
+		value = declared.get(name)
+		if isinstance(value, str) and value.startswith("n/a") and value[3:].strip(" :"):
+			continue
+		ids = [value] if isinstance(value, str) else value
+		if not ids or not all(isinstance(i, str) and i and not i.startswith("n/a") for i in ids):
+			raise Failure(
+				f"the PR touches the ledger: expect.json use_cases.{name} ({meaning}) needs "
+				f'an s0 scenario id, a list of them, or "n/a: <why>"'
+			)
 
 
 def _validate_risks(data, expect):

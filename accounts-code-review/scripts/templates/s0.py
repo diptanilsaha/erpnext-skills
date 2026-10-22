@@ -45,6 +45,11 @@ SCENARIOS = [
 ]
 
 
+# Fields to add to the snapshot of each document, beyond pr_ledger.DOC_FIELDS: the new
+# or changed fields of a feature, so assertions and the base/PR comparison can read them.
+DOC_FIELDS = {}  # e.g. {"Sales Invoice": ["discount_account"]}
+
+
 def reports(ctx):
 	"""Extra reports from the blast radius: {label: (report_name, filters)}. Use DATE-based filters."""
 	return {}
