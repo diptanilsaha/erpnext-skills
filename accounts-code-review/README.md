@@ -18,6 +18,68 @@ change.
 This file lists what you need before you run it. `SKILL.md` has the procedure
 that the agent follows.
 
+## Flow
+
+The agent writes the files that need judgment. The scripts do every other step.
+The agent writes its predictions before `lock`, and `run` refuses to start if a
+locked file changes.
+
+```mermaid
+flowchart TD
+    IN["Inputs: PR + requirement (issue or ticket) + site"] --> MISS{Anything missing?}
+    MISS -- yes --> ASK[Ask the user]
+    MISS -- no --> INIT
+
+    INIT["1. init (script)<br/>fetch PR, pin base/head SHAs,<br/>merge PR onto base, copy scripts to workdir"]
+    INIT -- "version mismatch / dirty checkout / merge conflict" --> STOP[Stop and report]
+    INIT --> REQ
+
+    subgraph AGENT1["Agent writes"]
+        REQ["2. requirement.md<br/>bug: Reported / Expected / Repro / Setup<br/>feature: Asked / Behavior / Example / Setup"]
+        CR["3. code-review.md<br/>frappe-code-review findings (file:line)"]
+        REQ --> CR
+    end
+
+    CR --> ANALYZE["4. analyze (script)<br/>analysis.json: changed symbols, callers, settings, ui_files, ledger<br/>plan.json: variants + flips"]
+    ANALYZE --> PLAN["Agent may only add to plan.json:<br/>Setup variants, company_profile, item_fields, ui, ledger"]
+
+    subgraph AGENT2["Agent writes predictions"]
+        RISKS["risks.json: failure cases + examples"]
+        S0["s0.py: Repro + risk scenarios"]
+        EXP["expect.json: assertions, allowed_changes, use_cases"]
+        UI["ui.spec.mjs (only for UI changes)"]
+    end
+
+    PLAN --> RISKS & S0 & EXP & UI
+    RISKS & S0 & EXP & UI --> LOCK["6a. lock (script)<br/>validate files, hash files + scripts snapshot"]
+
+    LOCK --> HASH{Files changed since lock?}
+    HASH -- yes --> REFUSE[run refuses]
+    HASH -- no --> BASE
+
+    subgraph RUN["6b. run (script)"]
+        BASE["Base code: checkout base, migrate,<br/>pause scheduler, probe, preflight"]
+        BASE --> BB["Each variant: switch settings, base_build<br/>(control C == treatment T self-check)"]
+        BB --> BF["Each flip: switch, base_flip"]
+        BF --> UB["UI only: create user, Playwright pass UB"]
+        UB --> HEAD["PR code: checkout head,<br/>migrate if JSON/patches/hooks changed, probe"]
+        HEAD --> HV["Each variant: switch, head_variant<br/>build H, rescan T, legacy actions, risk scenarios"]
+        HV --> LC["ledger on: ledger cases on each GL/PLE doc<br/>cancel, amend, pay_full,<br/>pay_partial_cancel, return_full"]
+        LC --> UH["UI only: Playwright pass UH"]
+    end
+
+    UH --> CLEAN["Cleanup: restore settings, scheduler, checkout, assets;<br/>delete review data unless --keep-data"]
+    CLEAN --> REPORT["7. report (script) via verdict.py<br/>compare build, rescan, legacy, flip, ui,<br/>invariants, ledger cases; decide each risk"]
+
+    REPORT --> V{Verdict: first match wins}
+    V --> INVALID["INVALID: no verdict"]
+    V --> NR["NOT REPRODUCED: not mergeable"]
+    V --> FAIL["FAIL: not mergeable"]
+    V --> PASS["PASS: mergeable"]
+
+    REPORT -. "to change an expectation: lock --reason, then run" .-> LOCK
+```
+
 ## What you give the agent
 
 - The pull request, as a number or a URL.
