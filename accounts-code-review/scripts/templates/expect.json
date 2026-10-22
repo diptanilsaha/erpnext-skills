@@ -1,0 +1,35 @@
+{
+ "kind": "bug",
+ "assertions": [
+  {
+   "path": "docs.s0_invoice.outstanding_amount",
+   "snapshot": "base",
+   "equals": 0,
+   "variants": "*",
+   "why": "Reported: <quote the requirement>"
+  },
+  {
+   "path": "docs.s0_invoice.outstanding_amount",
+   "snapshot": "head",
+   "equals": 0,
+   "variants": "*",
+   "why": "Expected: <quote the requirement>"
+  },
+  {
+   "path": "docs.r1_invoice.outstanding_amount",
+   "snapshot": "head",
+   "equals": 0,
+   "variants": "*",
+   "risk": "r1",
+   "why": "Risk r1: <the correct value, and why>"
+  }
+ ],
+ "allowed_changes": [
+  {
+   "comparison": "build",
+   "path": "docs.s0_invoice.outstanding_amount",
+   "variants": "*",
+   "reason": "the fix itself"
+  }
+ ]
+}
