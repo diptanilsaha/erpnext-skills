@@ -614,12 +614,17 @@ def _party_ledger_violations(company, norm):
 			as_dict=1,
 		)
 	]
+	# The payment ledger counts what is owed as positive: debit - credit on a receivable, but
+	# credit - debit on a payable. Put the GL net on the same sign before comparing.
 	gl = {
 		(r.account, r.party): flt(r.net, 2)
 		for r in frappe.db.sql(
-			f"""select account, party, sum(debit) - sum(credit) net from `tabGL Entry`
-			where company=%(company)s and is_cancelled=0 and account in ({party_accounts})
-			group by account, party""",
+			"""select e.account, e.party,
+				case when a.account_type = 'Payable' then sum(e.credit) - sum(e.debit)
+					else sum(e.debit) - sum(e.credit) end net
+			from `tabGL Entry` e inner join `tabAccount` a on a.name = e.account
+			where e.company=%(company)s and e.is_cancelled=0 and a.account_type in ('Receivable', 'Payable')
+			group by e.account, e.party, a.account_type""",
 			{"company": company},
 			as_dict=1,
 		)
